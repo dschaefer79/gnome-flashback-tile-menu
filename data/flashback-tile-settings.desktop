@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 dschaefer79
+# Written entirely with Claude (Anthropic's AI assistant).
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Window Tiling
+Comment=Choose columns, rows, the window gap, snapping and keyboard shortcuts for tiling
+Icon=view-grid
+Exec=flashback-tile-settings
+Terminal=false
+StartupNotify=true
+Categories=Settings;DesktopSettings;
+Keywords=tile;tiling;windows;snap;shortcuts;
+OnlyShowIn=GNOME-Flashback;

@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 dschaefer79
+# Written entirely with Claude (Anthropic's AI assistant).
+# Default resolutions for new users of the GNOME Flashback resolution menu.
+# One WIDTHxHEIGHT per line; users edit theirs in the settings window.
+1920x1080
+1900x1000
+5120x1440

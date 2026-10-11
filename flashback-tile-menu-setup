@@ -1,0 +1,252 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 dschaefer79
+# Written entirely with Claude (Anthropic's AI assistant).
+"""Put the Window Tiling and Resolution applets on the GNOME Flashback
+panel, or take them off.
+
+  flashback-tile-menu-setup [tiling|resolution|all]
+                              add the applet (both with all, the default)
+  flashback-tile-menu-setup all --auto
+                              at login: default shortcuts, the menus, and
+                              each applet once per user
+  flashback-tile-menu-setup tiling|resolution --remove
+                              take the applet off the panel
+  flashback-tile-menu-setup tiling|resolution --status
+                              print "on" if it is on a panel, else "off"
+  flashback-tile-menu-setup tiling|resolution --mark-removed
+                              remember that the user took it off (the
+                              applet runs this when removed from the panel)
+"""
+import os
+import subprocess
+import sys
+import time
+
+from gi.repository import Gio
+
+NAME = "gnome-flashback-tile-menu"
+MODULE_ID = "org.dschaefer79.tile-menu"
+MODULE_FILE = MODULE_ID + ".so"
+LAYOUT = "org.gnome.gnome-panel.layout"
+OBJECT = "org.gnome.gnome-panel.object"
+TOPLEVEL = "org.gnome.gnome-panel.toplevel"
+LAYOUT_PATH = "/org/gnome/gnome-panel/layout/"
+APPLETS = {"tiling": "Window Tiling", "resolution": "Resolution"}
+CONFIG_DIR = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), NAME)
+# Bump when the panel setup changes, so --auto upgrades existing users.
+SETUP_VERSION = "1"
+
+
+def marker(applet):
+    return os.path.join(CONFIG_DIR, f"added-{applet}")
+
+
+def mark(applet, value):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(marker(applet), "w") as f:
+        f.write(value + "\n")
+
+
+def read_mark(applet):
+    try:
+        with open(marker(applet)) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def have_panel():
+    source = Gio.SettingsSchemaSource.get_default()
+    return source is not None and source.lookup(LAYOUT, True) is not None
+
+
+def object_settings(object_id):
+    return Gio.Settings.new_with_path(OBJECT, f"{LAYOUT_PATH}objects/{object_id}/")
+
+
+def toplevel_settings(toplevel_id):
+    return Gio.Settings.new_with_path(TOPLEVEL, f"{LAYOUT_PATH}toplevels/{toplevel_id}/")
+
+
+def find(applet):
+    """Ids of the panel objects showing this applet."""
+    layout = Gio.Settings.new(LAYOUT)
+    found = []
+    for object_id in layout.get_strv("object-id-list"):
+        s = object_settings(object_id)
+        iid = s.get_string("object-iid")
+        if ((s.get_string("module-id") == MODULE_ID and s.get_string("applet-id") == applet)
+                or iid == f"{MODULE_ID}::{applet}"):
+            found.append(object_id)
+    return found
+
+
+def choose_toplevel(layout):
+    """A panel along the top of the screen, else the first one."""
+    toplevels = layout.get_strv("toplevel-id-list")
+    for toplevel_id in toplevels:
+        if toplevel_settings(toplevel_id).get_string("orientation") == "top":
+            return toplevel_id
+    return toplevels[0] if toplevels else None
+
+
+def panel_pids():
+    try:
+        out = subprocess.run(["pgrep", "-u", str(os.getuid()), "-x", "gnome-panel"],
+                             capture_output=True, text=True).stdout
+    except OSError:
+        return []
+    return [int(pid) for pid in out.split()]
+
+
+def module_path():
+    try:
+        out = subprocess.run(["pkg-config", "--variable=modulesdir", "libgnome-panel"],
+                             capture_output=True, text=True).stdout.strip()
+    except OSError:
+        out = ""
+    for directory in filter(None, [out, "/usr/lib64/gnome-panel/modules",
+                                   "/usr/lib/x86_64-linux-gnu/gnome-panel/modules",
+                                   "/usr/lib/gnome-panel/modules"]):
+        path = os.path.join(directory, MODULE_FILE)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def start_time(pid):
+    """When the process started, in seconds since the epoch."""
+    with open(f"/proc/{pid}/stat") as f:
+        # Field 22, counted after the command name in parentheses.
+        ticks = int(f.read().rpartition(")")[2].split()[19])
+    with open("/proc/stat") as f:
+        boot = next(int(line.split()[1]) for line in f if line.startswith("btime "))
+    return boot + ticks / os.sysconf("SC_CLK_TCK")
+
+
+def restart_panel_if_stale():
+    """gnome-panel finds modules only when it starts: a panel running since
+    before this package was installed would not know the applets. Start it
+    again then, as gnome-panel --replace."""
+    path = module_path()
+    pids = panel_pids()
+    if not path or not pids:
+        return
+    installed = os.stat(path).st_ctime
+    try:
+        started = min(start_time(pid) for pid in pids)
+    except (OSError, ValueError, IndexError):
+        return
+    if started < installed:
+        subprocess.Popen(["gnome-panel", "--replace"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+
+
+def add(applet, wait=0):
+    """Put the applet on the panel, left of the icons on the right end of
+    a top panel. Waits up to wait seconds for a new user's panel."""
+    if not have_panel():
+        print("gnome-panel is not installed.", file=sys.stderr)
+        return False
+    layout = Gio.Settings.new(LAYOUT)
+    deadline = time.monotonic() + wait
+    toplevel = choose_toplevel(layout)
+    while toplevel is None and time.monotonic() < deadline:
+        time.sleep(2)
+        toplevel = choose_toplevel(layout)
+    if find(applet):
+        mark(applet, SETUP_VERSION)
+        print(f"{APPLETS[applet]} is already on the panel.")
+        return True
+    if toplevel is None:
+        print("No GNOME Flashback panel found.", file=sys.stderr)
+        return False
+
+    restart_panel_if_stale()
+    ids = list(layout.get_strv("object-id-list"))
+    end_indexes = [-1]
+    for object_id in ids:
+        s = object_settings(object_id)
+        if s.get_string("toplevel-id") == toplevel and s.get_string("pack-type") == "end":
+            end_indexes.append(s.get_int("pack-index"))
+    object_id = f"tile-menu-{applet}"
+    number = 1
+    while object_id in ids:
+        number += 1
+        object_id = f"tile-menu-{applet}-{number}"
+    s = object_settings(object_id)
+    s.set_string("module-id", MODULE_ID)
+    s.set_string("applet-id", applet)
+    s.set_string("toplevel-id", toplevel)
+    s.set_string("pack-type", "end")
+    s.set_int("pack-index", max(end_indexes) + 1)
+    layout.set_strv("object-id-list", ids + [object_id])
+    Gio.Settings.sync()
+    mark(applet, SETUP_VERSION)
+    print(f"Added {APPLETS[applet]} to the panel.")
+    return True
+
+
+def remove(applet):
+    if not have_panel():
+        return
+    layout = Gio.Settings.new(LAYOUT)
+    found = find(applet)
+    if found:
+        layout.set_strv("object-id-list",
+                        [i for i in layout.get_strv("object-id-list") if i not in found])
+        for object_id in found:
+            s = object_settings(object_id)
+            for key in s.props.settings_schema.list_keys():
+                s.reset(key)
+        Gio.Settings.sync()
+        print(f"Removed {APPLETS[applet]} from the panel.")
+    else:
+        print(f"{APPLETS[applet]} is not on the panel.")
+    mark(applet, "removed")
+
+
+def write_menus():
+    for command in (["flashback-tile", "menu"], ["flashback-resolution-settings", "--regenerate"]):
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def main():
+    args = sys.argv[1:]
+    which = args.pop(0) if args and not args[0].startswith("-") else "all"
+    option = args.pop(0) if args else ""
+    if which not in (*APPLETS, "all") or args or option not in (
+            "", "--auto", "--remove", "--status", "--mark-removed"):
+        sys.exit(__doc__.strip())
+    # The resolution applet first, so the tiling one ends up left of it.
+    applets = ["resolution", "tiling"] if which == "all" else [which]
+
+    if option == "--auto":
+        # Default keys for the tiling actions, once per user, and the menus
+        # in step with this version and the keyboard shortcuts.
+        subprocess.run(["flashback-tile", "default-shortcuts"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        write_menus()
+        for applet in applets:
+            # "removed" means the user took the applet off; respect that.
+            if read_mark(applet) not in (SETUP_VERSION, "removed"):
+                add(applet, wait=60)
+    elif option == "--remove":
+        for applet in applets:
+            remove(applet)
+    elif option == "--status":
+        print("\n".join("on" if have_panel() and find(a) else "off" for a in applets))
+    elif option == "--mark-removed":
+        for applet in applets:
+            mark(applet, "removed")
+    else:
+        write_menus()
+        ok = all([add(applet) for applet in applets])
+        sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()

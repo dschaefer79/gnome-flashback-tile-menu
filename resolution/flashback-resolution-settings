@@ -1,0 +1,386 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 dschaefer79
+# Written entirely with Claude (Anthropic's AI assistant).
+"""Edit the resolutions shown in the GNOME Flashback resolution menu.
+
+Run without arguments to open the settings window, or with --regenerate
+to rebuild the menu files from the saved list.
+"""
+import importlib.machinery
+import importlib.util
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+NAME = "gnome-flashback-tile-menu"
+DEFAULTS = f"/etc/{NAME}/resolutions"
+FALLBACK = ["1920x1080", "1900x1000", "5120x1440"]
+CONFIG_DIR = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+    NAME,
+)
+LIST_FILE = os.path.join(CONFIG_DIR, "resolutions")
+MENU_FILE = os.path.join(CONFIG_DIR, "resolution.menu")
+OPTIONS_FILE = os.path.join(CONFIG_DIR, "resolution-options")
+MODE_RE = re.compile(r"^([1-9][0-9]{2,4})x([1-9][0-9]{2,4})$")
+
+
+def parse_list(path):
+    modes = []
+    with open(path) as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if MODE_RE.match(line) and line not in modes:
+                modes.append(line)
+    return modes
+
+
+def load():
+    for path in (LIST_FILE, DEFAULTS):
+        try:
+            return parse_list(path)
+        except OSError:
+            pass
+    return list(FALLBACK)
+
+
+def load_options():
+    """Options stored as key=value lines; currently only create_in_xrandr
+    (on by default, as in plasma-tile-menu)."""
+    options = {"create_in_xrandr": True}
+    try:
+        with open(OPTIONS_FILE) as f:
+            for line in f:
+                key, _, value = line.strip().partition("=")
+                if key in options:
+                    options[key] = value == "true"
+    except OSError:
+        pass
+    return options
+
+
+def save_options(options):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    write_file(OPTIONS_FILE, "".join(
+        f"{k}={'true' if v else 'false'}\n" for k, v in options.items()))
+
+
+def create_in_xrandr(mode):
+    """Add the mode to xrandr without switching. Returns an error or None."""
+    try:
+        r = subprocess.run(["flashback-resolution-set", "--create", mode],
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return str(e)
+    if r.returncode != 0:
+        return r.stderr.strip().removeprefix("flashback-resolution-set: ") or "failed"
+    return None
+
+
+def write_file(path, text):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def load_flashback_tile():
+    """flashback-tile, as a module: it writes the menu files and keeps the
+    settings files of both menus."""
+    path = shutil.which("flashback-tile") or "/usr/bin/flashback-tile"
+    loader = importlib.machinery.SourceFileLoader("flashback_tile", path)
+    spec = importlib.util.spec_from_loader("flashback_tile", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def save(modes):
+    """Store the list and rebuild the panel menu."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    write_file(LIST_FILE, "".join(m + "\n" for m in modes))
+    tile = load_flashback_tile()
+    items = []
+    for m in modes:
+        w, h = m.split("x")
+        items.append(tile.menu_item(f"{w} × {h}", f"flashback-resolution-set {m}",
+                                    "video-display-symbolic",
+                                    f"Switch the display resolution to {m}"))
+    items.append(tile.SEPARATOR)
+    items.append(tile.menu_item("Settings…", "flashback-resolution-settings",
+                                "preferences-system-symbolic",
+                                "Add or remove resolutions in this menu"))
+    # Take the applet off the panel; "Resolution Menu" in the
+    # applications menu puts it back.
+    items.append(tile.menu_item("Quit", "flashback-tile-menu-setup resolution --remove",
+                                "application-exit-symbolic",
+                                "Remove the Resolution menu from the panel (Resolution "
+                                "Menu in the applications menu puts it back)"))
+    tile.write_menu_file(MENU_FILE, items)
+
+
+def current_mode():
+    try:
+        out = subprocess.run(
+            ["xrandr", "--query"], capture_output=True, text=True, timeout=5
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r" connected (?:primary )?(\d+)x(\d+)\+", out)
+    return f"{m[1]}x{m[2]}" if m else None
+
+
+def run_gui():
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    modes = load()
+    save(modes)
+
+    win = Gtk.Window(title="Resolution Menu")
+    win.set_icon_name("video-display")
+    win.set_default_size(360, 400)
+    win.set_border_width(12)
+    win.connect("destroy", Gtk.main_quit)
+
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    win.add(box)
+
+    # The panel button: on or off right away, like the other settings here.
+    on_panel = Gtk.CheckButton(label="Show the Resolution menu on the panel")
+    on_panel.set_active(subprocess.run(
+        ["flashback-tile-menu-setup", "resolution", "--status"],
+        capture_output=True, text=True).stdout.strip() == "on")
+    on_panel.connect("toggled", lambda b: subprocess.Popen(
+        ["flashback-tile-menu-setup", "resolution"] + ([] if b.get_active() else ["--remove"]),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    box.pack_start(on_panel, False, False, 0)
+
+    hint = Gtk.Label(xalign=0)
+    hint.set_markup(
+        "Resolutions shown in the panel menu, top to bottom.\n"
+        f"<small>Current: {current_mode() or 'unknown'}</small>"
+    )
+    box.pack_start(hint, False, False, 0)
+
+    store = Gtk.ListStore(str)
+    for m in modes:
+        store.append([m])
+    view = Gtk.TreeView(model=store, headers_visible=False)
+    view.append_column(
+        Gtk.TreeViewColumn("Resolution", Gtk.CellRendererText(), text=0)
+    )
+    scroll = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN, vexpand=True)
+    scroll.add(view)
+
+    side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    btn_up = Gtk.Button(label="Move up")
+    btn_down = Gtk.Button(label="Move down")
+    btn_edit = Gtk.Button(label="Edit…")
+    btn_edit.set_tooltip_text("Change the selected resolution (or double-click it)")
+    btn_remove = Gtk.Button(label="Remove")
+    btn_now = Gtk.Button(label="Add to the screen now")
+    btn_now.set_tooltip_text("Add the selected resolution to the screen's list "
+                             "of modes now, without switching to it")
+    for b in (btn_up, btn_down, btn_edit, btn_remove, btn_now):
+        side.pack_start(b, False, False, 0)
+
+    row = Gtk.Box(spacing=6)
+    row.pack_start(scroll, True, True, 0)
+    row.pack_start(side, False, False, 0)
+    box.pack_start(row, True, True, 0)
+
+    add_row = Gtk.Box(spacing=6)
+    width = Gtk.SpinButton.new_with_range(320, 32768, 1)
+    height = Gtk.SpinButton.new_with_range(200, 32768, 1)
+    width.set_value(1920)
+    height.set_value(1080)
+    btn_add = Gtk.Button(label="Add")
+    add_row.pack_start(width, True, True, 0)
+    add_row.pack_start(Gtk.Label(label="×"), False, False, 0)
+    add_row.pack_start(height, True, True, 0)
+    add_row.pack_start(btn_add, False, False, 0)
+    box.pack_start(add_row, False, False, 0)
+
+    options = load_options()
+    create = Gtk.CheckButton(label="Add new resolutions to the screen right away")
+    create.set_active(options["create_in_xrandr"])
+    create.set_tooltip_text(
+        "When you add a resolution, register it with xrandr right away "
+        "(without switching), so it is available at once, also in the "
+        "Display settings."
+    )
+    box.pack_start(create, False, False, 0)
+
+    status = Gtk.Label(xalign=0)
+    status.set_line_wrap(True)
+    box.pack_start(status, False, False, 0)
+
+    def create_modes(modes):
+        """Create modes in xrandr; return a status text."""
+        failed = []
+        for m in modes:
+            err = create_in_xrandr(m)
+            if err:
+                failed.append(f"{m}: {err}")
+        if failed:
+            return "xrandr: " + "; ".join(failed)
+        return None
+
+    def on_create_toggled(*_):
+        options["create_in_xrandr"] = create.get_active()
+        save_options(options)
+        if options["create_in_xrandr"]:
+            modes = [r[0] for r in store]
+            status.set_text(create_modes(modes) or
+                            f"Created {len(modes)} resolutions in xrandr.")
+
+    create.connect("toggled", on_create_toggled)
+
+    btn_close = Gtk.Button(label="Close")
+    btn_close.connect("clicked", lambda *_: win.destroy())
+    bottom = Gtk.Box(spacing=6)
+    bottom.pack_end(btn_close, False, False, 0)
+
+    # The settings of both menus and the shortcuts in one file, through
+    # flashback-tile.
+    def settings_file(save):
+        if load_flashback_tile().settings_file_dialog(win, save) and not save:
+            # Open again, showing the loaded list.
+            os.execv(sys.argv[0], sys.argv)
+
+    btn_save = Gtk.Button(label="Save settings to file…")
+    btn_save.connect("clicked", lambda *_: settings_file(True))
+    btn_load = Gtk.Button(label="Load settings from file…")
+    btn_load.connect("clicked", lambda *_: settings_file(False))
+    bottom.pack_start(btn_save, False, False, 0)
+    bottom.pack_start(btn_load, False, False, 0)
+    box.pack_start(bottom, False, False, 0)
+
+    def commit():
+        save([r[0] for r in store])
+
+    def selected():
+        model, it = view.get_selection().get_selected()
+        return it
+
+    def update_buttons(*_):
+        it = selected()
+        has = it is not None
+        btn_remove.set_sensitive(has and len(store) > 1)
+        btn_up.set_sensitive(has and store.iter_previous(it) is not None)
+        btn_down.set_sensitive(has and store.iter_next(it) is not None)
+        btn_now.set_sensitive(has)
+        btn_edit.set_sensitive(has)
+
+    def on_add(*_):
+        width.update()
+        height.update()
+        mode = f"{width.get_value_as_int()}x{height.get_value_as_int()}"
+        if any(r[0] == mode for r in store):
+            status.set_text(f"{mode} is already in the menu.")
+            return
+        it = store.append([mode])
+        view.get_selection().select_iter(it)
+        commit()
+        msg = f"Added {mode}."
+        if options["create_in_xrandr"]:
+            msg = create_modes([mode]) or f"Added {mode} and created it in xrandr."
+        status.set_text(msg)
+
+    def on_remove(*_):
+        it = selected()
+        if it is None or len(store) <= 1:
+            return
+        mode = store[it][0]
+        store.remove(it)
+        commit()
+        update_buttons()
+        status.set_text(f"Removed {mode}.")
+
+    def on_move(_, up):
+        it = selected()
+        if it is None:
+            return
+        other = store.iter_previous(it) if up else store.iter_next(it)
+        if other is not None:
+            store.swap(it, other)
+            commit()
+            update_buttons()
+
+    def on_now(*_):
+        it = selected()
+        if it is None:
+            return
+        mode = store[it][0]
+        status.set_text(create_modes([mode]) or f"Added {mode} to the screen.")
+
+    def on_edit(*_):
+        """Change the selected resolution in a small dialog."""
+        it = selected()
+        if it is None:
+            return
+        old = store[it][0]
+        w, h = (int(v) for v in old.split("x"))
+        dialog = Gtk.Dialog(title="Edit resolution", transient_for=win, modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        edit_w = Gtk.SpinButton.new_with_range(320, 32768, 1)
+        edit_h = Gtk.SpinButton.new_with_range(200, 32768, 1)
+        edit_w.set_value(w)
+        edit_h.set_value(h)
+        for spin in (edit_w, edit_h):
+            spin.set_activates_default(True)
+        fields = Gtk.Box(spacing=6, margin=12)
+        fields.pack_start(edit_w, True, True, 0)
+        fields.pack_start(Gtk.Label(label="×"), False, False, 0)
+        fields.pack_start(edit_h, True, True, 0)
+        dialog.get_content_area().add(fields)
+        dialog.show_all()
+        response = dialog.run()
+        edit_w.update()
+        edit_h.update()
+        mode = f"{edit_w.get_value_as_int()}x{edit_h.get_value_as_int()}"
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK or mode == old:
+            return
+        if any(r[0] == mode for r in store):
+            status.set_text(f"{mode} is already in the menu.")
+            return
+        store[it][0] = mode
+        commit()
+        msg = f"Changed {old} to {mode}."
+        if options["create_in_xrandr"]:
+            msg = create_modes([mode]) or f"Changed {old} to {mode} and added it to the screen."
+        status.set_text(msg)
+
+    btn_edit.connect("clicked", on_edit)
+    view.connect("row-activated", on_edit)
+    btn_add.connect("clicked", on_add)
+    btn_now.connect("clicked", on_now)
+    btn_remove.connect("clicked", on_remove)
+    btn_up.connect("clicked", on_move, True)
+    btn_down.connect("clicked", on_move, False)
+    view.get_selection().connect("changed", update_buttons)
+    update_buttons()
+
+    win.show_all()
+    Gtk.main()
+
+
+def main():
+    if sys.argv[1:] == ["--regenerate"]:
+        save(load())
+    elif sys.argv[1:]:
+        sys.exit("usage: flashback-resolution-settings [--regenerate]")
+    else:
+        run_gui()
+
+
+if __name__ == "__main__":
+    main()

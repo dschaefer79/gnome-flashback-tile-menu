@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 dschaefer79
+# Written entirely with Claude (Anthropic's AI assistant).
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Resolution Menu Settings
+Comment=Add or remove resolutions in the panel resolution menu
+Icon=video-display
+Exec=flashback-resolution-settings
+Terminal=false
+StartupNotify=true
+Categories=Settings;HardwareSettings;
+Keywords=resolution;screen;display;xrandr;
+OnlyShowIn=GNOME-Flashback;

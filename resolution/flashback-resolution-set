@@ -1,0 +1,61 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 dschaefer79
+# Written entirely with Claude (Anthropic's AI assistant).
+# Switch the first connected output to WIDTHxHEIGHT, adding the mode if needed.
+#   flashback-resolution-set WIDTHxHEIGHT            add the mode if needed and switch
+#   flashback-resolution-set --create WIDTHxHEIGHT   only add the mode to xrandr
+set -u
+
+create_only=no
+if [ "${1:-}" = --create ]; then
+    create_only=yes
+    shift
+fi
+
+fail() {
+    echo "flashback-resolution-set: $*" >&2
+    # With --create the caller (the settings window) reports the error.
+    [ "${create_only:-no}" = no ] && command -v notify-send >/dev/null 2>&1 &&
+        notify-send -i video-display "Resolution change failed" "$*"
+    exit 1
+}
+
+mode="${1:-}"
+case $mode in
+    [1-9]*x[1-9]*) ;;
+    *) fail "usage: flashback-resolution-set [--create] WIDTHxHEIGHT" ;;
+esac
+w=${mode%%x*}
+h=${mode#*x}
+case $w$h in *[!0-9]*) fail "invalid resolution: $mode" ;; esac
+
+out=$(xrandr --query | awk '$2 == "connected" { print $1; exit }')
+[ -n "$out" ] || fail "no connected output found"
+
+# Is the mode already listed under this output?
+has_mode() {
+    xrandr --query | awk -v o="$out" -v m="$mode" '
+        $1 == o { inside = 1; next }
+        inside && /^[^ \t]/ { exit }
+        inside && $1 == m { found = 1; exit }
+        END { exit !found }'
+}
+
+if ! has_mode; then
+    # VNC servers accept any size; real outputs need proper CVT timings.
+    timings=""
+    case $out in
+        VNC-*) ;;
+        *) command -v cvt >/dev/null 2>&1 &&
+               timings=$(cvt "$w" "$h" 60 | sed -n 's/^Modeline "[^"]*" *//p') ;;
+    esac
+    [ -n "$timings" ] || timings="0 $w $w $w $w $h $h $h $h"
+    # --newmode fails harmlessly if the mode exists but isn't on this output.
+    xrandr --newmode "$mode" $timings 2>/dev/null
+    xrandr --addmode "$out" "$mode" || fail "could not add $mode to $out"
+fi
+
+[ "$create_only" = yes ] && exit 0
+
+xrandr --output "$out" --mode "$mode" || fail "could not switch $out to $mode"

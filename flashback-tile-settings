@@ -1,0 +1,412 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 dschaefer79
+# Written entirely with Claude (Anthropic's AI assistant).
+"""Settings window for flashback-tile, like the Plasma widget's settings:
+tiling on/off, new windows, columns and rows, the window gap, snapping, and
+the keyboard shortcuts.
+
+  flashback-tile-settings              open the window
+  flashback-tile-settings --shortcuts  open it on the keyboard shortcuts
+"""
+import importlib.machinery
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+
+import gi
+
+gi.require_version("Gdk", "3.0")
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gdk, Gtk  # noqa: E402
+
+
+def load_flashback_tile():
+    """flashback-tile has no .py name; load it as a module for its settings
+    code."""
+    path = shutil.which("flashback-tile") or "/usr/bin/flashback-tile"
+    loader = importlib.machinery.SourceFileLoader("flashback_tile", path)
+    spec = importlib.util.spec_from_loader("flashback_tile", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+tile = load_flashback_tile()
+# Not tiling settings: Metacity's switches and the panel applet, applied
+# with the others.
+OTHER_KEYS = ("windowEffects", "edgeTiling", "showMenu")
+
+
+def capture_shortcut(parent, title):
+    """Ask for a key combination: an accelerator, "" to remove the
+    shortcut, or None if cancelled."""
+    dialog = Gtk.Dialog(title=title, transient_for=parent, modal=True)
+    dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+    label = Gtk.Label(label="Press the new shortcut.\n\n"
+                            "Backspace removes the shortcut, Esc cancels.",
+                      justify=Gtk.Justification.CENTER, margin=24)
+    dialog.get_content_area().add(label)
+    result = {}
+
+    def on_key(widget, event):
+        mods = event.state & Gtk.accelerator_get_default_mod_mask()
+        keyval = Gdk.keyval_to_lower(event.keyval)
+        if not mods and keyval == Gdk.KEY_Escape:
+            dialog.response(Gtk.ResponseType.CANCEL)
+        elif not mods and keyval == Gdk.KEY_BackSpace:
+            result["accel"] = ""
+            dialog.response(Gtk.ResponseType.OK)
+        elif Gtk.accelerator_valid(keyval, mods) and (
+                # Plain keys would stop typing them; function keys are fine.
+                mods or Gdk.KEY_F1 <= keyval <= Gdk.KEY_F35):
+            result["accel"] = Gtk.accelerator_name(keyval, mods)
+            dialog.response(Gtk.ResponseType.OK)
+        return True
+
+    dialog.connect("key-press-event", on_key)
+    dialog.show_all()
+    response = dialog.run()
+    dialog.destroy()
+    return result.get("accel") if response == Gtk.ResponseType.OK else None
+
+
+def small(text):
+    label = Gtk.Label(xalign=0)
+    label.set_markup(f"<small>{text}</small>")
+    label.set_line_wrap(True)
+    label.set_max_width_chars(60)
+    return label
+
+
+def heading(text):
+    label = Gtk.Label(xalign=0, margin_top=6)
+    label.set_markup(f"<b>{text}</b>")
+    return label
+
+
+def tiling_page(settings, changed):
+    """The Tiling page; changed() is called after each change."""
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, border_width=12)
+    widgets = {}
+
+    def check(key, label, hint=None, indent=0):
+        button = Gtk.CheckButton(label=label, margin_start=indent)
+        button.set_active(settings[key])
+        button.connect("toggled", lambda b: (settings.__setitem__(key, b.get_active()), changed()))
+        box.pack_start(button, False, False, 0)
+        if hint:
+            note = small(hint)
+            note.set_margin_start(indent + 24)
+            box.pack_start(note, False, False, 0)
+        widgets[key] = button
+        return button
+
+    grid_rows = {}
+
+    def spin(grid, row, key, label, unit=""):
+        name = Gtk.Label(label=label, xalign=0)
+        grid.attach(name, 0, row, 1, 1)
+        low, high = tile.LIMITS[key]
+        button = Gtk.SpinButton.new_with_range(low, high, 1)
+        button.set_value(settings[key])
+        button.connect("value-changed",
+                       lambda b: (settings.__setitem__(key, b.get_value_as_int()), changed()))
+        grid.attach(button, 1, row, 1, 1)
+        grid.attach(Gtk.Label(label=unit, xalign=0), 2, row, 1, 1)
+        widgets[key] = button
+        grid_rows[key] = name
+        return button
+
+    box.pack_start(heading("Panel"), False, False, 0)
+    check("showMenu", "Show the Tiling menu on the panel",
+          "Untick to take it off, as Quit in the menu does.")
+
+    box.pack_start(heading("Tiling"), False, False, 0)
+    check("disabled", "Disable tiling completely",
+          "Nothing is tiled or snapped while this is on; Restore windows still works.")
+    check("tileNew", "Tile new windows automatically",
+          "Each window that opens is tiled together with the others on its screen, "
+          "in the layout last used there (at first, “Tile automatically”).")
+    check("showAuto", "Show “Tile automatically” in the menu",
+          "Untick to keep only the entries with a fixed number of columns or rows.")
+
+    box.pack_start(heading("Columns and rows"), False, False, 0)
+    box.pack_start(small("With both on, windows are tiled into a grid of columns and rows."),
+                   False, False, 0)
+    grid = Gtk.Grid(row_spacing=6, column_spacing=12, margin_start=12)
+    vertical = Gtk.CheckButton(label="Vertical: tile into columns side by side")
+    vertical.set_active(settings["vertical"])
+    vertical.connect("toggled", lambda b: (settings.__setitem__("vertical", b.get_active()), changed()))
+    widgets["vertical"] = vertical
+    grid.attach(vertical, 0, 0, 3, 1)
+    spin(grid, 1, "wideMinWidth", "Wide screen from", "pixels wide")
+    spin(grid, 2, "wideColumns", "Columns on wide screens")
+    spin(grid, 3, "normalColumns", "Columns on other screens")
+    horizontal = Gtk.CheckButton(label="Horizontal: tile into rows stacked top to bottom",
+                                 margin_top=6)
+    horizontal.set_active(settings["horizontal"])
+    horizontal.connect("toggled", lambda b: (settings.__setitem__("horizontal", b.get_active()), changed()))
+    widgets["horizontal"] = horizontal
+    grid.attach(horizontal, 0, 4, 3, 1)
+    spin(grid, 5, "tallMinHeight", "Tall screen from", "pixels high")
+    spin(grid, 6, "tallRows", "Rows on tall screens")
+    spin(grid, 7, "normalRows", "Rows on other screens")
+    box.pack_start(grid, False, False, 0)
+
+    box.pack_start(heading("Gap between windows"), False, False, 0)
+    gap_row = Gtk.Box(spacing=6, margin_start=12)
+    gap_px = Gtk.SpinButton.new_with_range(*tile.LIMITS["gap"], 1)
+    gap_px.set_value(settings["gap"])
+    gap_px.connect("value-changed", lambda b: (settings.__setitem__("gap", b.get_value_as_int()), changed()))
+    gap_mm = Gtk.SpinButton.new_with_range(*tile.LIMITS["gapMm"], 1)
+    gap_mm.set_value(settings["gapMm"])
+    gap_mm.connect("value-changed", lambda b: (settings.__setitem__("gapMm", b.get_value_as_int()), changed()))
+    unit = Gtk.ComboBoxText()
+    unit.append("px", "pixels")
+    unit.append("mm", "mm")
+    unit.set_active_id(settings["gapUnit"])
+    unit.connect("changed", lambda c: (settings.__setitem__("gapUnit", c.get_active_id()), changed()))
+    for w in (gap_px, gap_mm, unit):
+        gap_row.pack_start(w, False, False, 0)
+    box.pack_start(gap_row, False, False, 0)
+    mm_note = small("Millimetres on the screen, worked out from its physical size.")
+    mm_note.set_margin_start(12)
+    box.pack_start(mm_note, False, False, 0)
+
+    box.pack_start(heading("Resizing"), False, False, 0)
+    check("resizeNeighbours", "Resize neighbouring windows together",
+          "Dragging the left or right edge of a window also moves the edge of the "
+          "window next to it, so windows side by side stay together.")
+
+    box.pack_start(heading("Snapping"), False, False, 0)
+    check("snap", "Automatic tiling: snap windows into place when dropped")
+    shift_only = check("snapShiftOnly", "Only when Shift is held while dropping", indent=24)
+    shift_swap = check("snapShiftSwap", "", indent=24)
+    snap_note = small("")
+    snap_note.set_margin_start(24)
+    box.pack_start(snap_note, False, False, 0)
+    check("edgeTiling", "Metacity edge tiling: a window dragged to the left or right "
+          "edge fills that half of the screen",
+          "The window manager's own snapping. Untick it if it gets in the way of "
+          "snapping into columns.")
+
+    box.pack_start(heading("Window effects"), False, False, 0)
+    check("windowEffects", "Window effects: shadows, transparency and fading",
+          "Untick to turn Metacity's compositor off for all windows, which can "
+          "make remote desktops faster.")
+
+    def update():
+        v, h = settings["vertical"], settings["horizontal"]
+        # Keep at least one direction on.
+        vertical.set_sensitive(not v or h)
+        horizontal.set_sensitive(not h or v)
+        for key in ("wideMinWidth", "wideColumns", "normalColumns"):
+            widgets[key].set_sensitive(v)
+            grid_rows[key].set_sensitive(v)
+        for key in ("tallMinHeight", "tallRows", "normalRows"):
+            widgets[key].set_sensitive(h)
+            grid_rows[key].set_sensitive(h)
+        for key in ("tileNew", "showAuto"):
+            widgets[key].set_sensitive(not settings["disabled"])
+        mm = settings["gapUnit"] == "mm"
+        gap_px.set_visible(not mm)
+        gap_mm.set_visible(mm)
+        mm_note.set_visible(mm)
+
+        on = settings["snap"]
+        shift_only.set_sensitive(on)
+        shift_swap.set_sensitive(on)
+        shift_swap.set_label("Hold Shift to swap columns and rows" if v and h else
+                             "Hold Shift to snap into rows instead of columns" if v else
+                             "Hold Shift to snap into columns instead of rows")
+        other = ("with columns and rows swapped" if v and h else
+                 "into the row" if v else "into the column")
+        here = "the grid cell" if v and h else "the column" if v else "the row"
+        only, swap = settings["snapShiftOnly"], settings["snapShiftSwap"]
+        if not on:
+            text = ("Drag a window with the mouse and let go: with snapping on, it fills "
+                    "the column, row or grid cell under the pointer.")
+        elif only and swap:
+            text = ("A window dropped normally stays where it is. Hold Shift while "
+                    f"dropping to snap it {other} under the pointer.")
+        elif only:
+            text = ("A window dropped normally stays where it is. Hold Shift while "
+                    f"dropping to make it fill {here} under the pointer.")
+        elif swap:
+            text = (f"A dropped window fills {here} under the pointer. Hold Shift "
+                    f"while dropping to snap it {other} instead.")
+        else:
+            text = f"A dropped window fills {here} under the pointer."
+        snap_note.set_markup(f"<small>{text}</small>")
+
+    return box, update
+
+
+def shortcuts_page(window):
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, border_width=12)
+    box.pack_start(small("Shortcuts work anywhere in GNOME Flashback. They are custom "
+                         "shortcuts, also listed in Settings › Keyboard › Keyboard "
+                         "Shortcuts › Custom Shortcuts."),
+                   False, False, 0)
+    grid = Gtk.Grid(row_spacing=6, column_spacing=12, margin_top=6)
+    box.pack_start(grid, False, False, 0)
+    labels = {}
+
+    def refresh():
+        by_command = tile.shortcut_labels()
+        for command, label in labels.items():
+            accel = by_command.get(command)
+            if accel:
+                key, mods = Gtk.accelerator_parse(accel)
+                label.set_text(Gtk.accelerator_get_label(key, mods) or accel)
+            else:
+                label.set_text("None")
+
+    def on_set(button, title, command):
+        accel = capture_shortcut(window, title)
+        if accel is None:
+            return
+        taken = tile.taken_keys().get(tile.key_id(accel)) if accel else None
+        if taken and taken != command:
+            dialog = Gtk.MessageDialog(
+                transient_for=window, modal=True, message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.OK_CANCEL,
+                text=f"{Gtk.accelerator_get_label(*Gtk.accelerator_parse(accel))} "
+                     f"is already used for “{taken}”. Use it for “{title}” too?")
+            dialog.format_secondary_text(
+                "A custom shortcut loses the key; a key of the desktop itself keeps "
+                "working there and may win.")
+            response = dialog.run()
+            dialog.destroy()
+            if response != Gtk.ResponseType.OK:
+                return
+        tile.set_shortcut(command, accel)
+        refresh()
+
+    for row, (title, command, _) in enumerate(tile.SHORTCUTS):
+        grid.attach(Gtk.Label(label=title, xalign=0, hexpand=True), 0, row, 1, 1)
+        label = Gtk.Label(xalign=0)
+        label.get_style_context().add_class("dim-label")
+        labels[command] = label
+        grid.attach(label, 1, row, 1, 1)
+        button = Gtk.Button(label="Set…")
+        button.connect("clicked", on_set, title, command)
+        grid.attach(button, 2, row, 1, 1)
+        clear = Gtk.Button.new_from_icon_name("edit-clear-symbolic", Gtk.IconSize.BUTTON)
+        clear.set_tooltip_text("Remove the shortcut")
+        clear.connect("clicked", lambda b, c: (tile.set_shortcut(c, None), refresh()), command)
+        grid.attach(clear, 3, row, 1, 1)
+    refresh()
+    return box
+
+
+def main():
+    page = "shortcuts" if sys.argv[1:] == ["--shortcuts"] else "tiling"
+    if sys.argv[1:] not in ([], ["--shortcuts"]):
+        sys.exit("usage: flashback-tile-settings [--shortcuts]")
+    settings = tile.load_settings()
+    settings["windowEffects"] = tile.window_effects()
+    settings["edgeTiling"] = tile.edge_tiling()
+    settings["showMenu"] = subprocess.run(
+        ["flashback-tile-menu-setup", "tiling", "--status"],
+        capture_output=True, text=True).stdout.strip() == "on"
+    saved = dict(settings)
+
+    win = Gtk.Window(title="Window Tiling")
+    win.set_icon_name("view-grid")
+    win.set_border_width(6)
+    win.connect("destroy", Gtk.main_quit)
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    win.add(outer)
+
+    def changed():
+        update()
+        btn_apply.set_sensitive(settings != saved)
+
+    notebook = Gtk.Notebook()
+    tiling, update = tiling_page(settings, changed)
+    # The page is taller than small screens: scroll it, no higher than the
+    # screen leaves room for.
+    scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                propagate_natural_width=True, propagate_natural_height=True)
+    monitor = Gdk.Display.get_default().get_primary_monitor() or \
+        Gdk.Display.get_default().get_monitor(0)
+    scroll.set_max_content_height(max(300, monitor.get_workarea().height - 200))
+    scroll.add(tiling)
+    notebook.append_page(scroll, Gtk.Label(label="Tiling"))
+    notebook.append_page(shortcuts_page(win), Gtk.Label(label="Keyboard shortcuts"))
+    outer.pack_start(notebook, True, True, 0)
+
+    def apply(*_):
+        tile.save_settings({k: v for k, v in settings.items() if k not in OTHER_KEYS})
+        if settings["windowEffects"] != saved.get("windowEffects"):
+            tile.set_window_effects(settings["windowEffects"])
+        if settings["edgeTiling"] != saved.get("edgeTiling"):
+            tile.set_edge_tiling(settings["edgeTiling"])
+        if settings["showMenu"] != saved.get("showMenu"):
+            subprocess.Popen(["flashback-tile-menu-setup", "tiling"]
+                             + ([] if settings["showMenu"] else ["--remove"]),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        saved.clear()
+        saved.update(settings)
+        btn_apply.set_sensitive(False)
+
+    def on_delete(*_):
+        """Ask about unsaved changes; True keeps the window open."""
+        if settings == saved:
+            return False
+        dialog = Gtk.MessageDialog(
+            transient_for=win, modal=True, message_type=Gtk.MessageType.QUESTION,
+            text="Apply your changes before closing?",
+        )
+        dialog.add_buttons("Discard", Gtk.ResponseType.NO,
+                           "Cancel", Gtk.ResponseType.CANCEL,
+                           "Apply", Gtk.ResponseType.YES)
+        dialog.set_default_response(Gtk.ResponseType.YES)
+        response = dialog.run()
+        dialog.destroy()
+        if response == Gtk.ResponseType.YES:
+            apply()
+        return response not in (Gtk.ResponseType.YES, Gtk.ResponseType.NO)
+
+    btn_apply = Gtk.Button(label="Apply")
+    btn_apply.set_sensitive(False)
+    btn_apply.connect("clicked", apply)
+    btn_close = Gtk.Button(label="Close")
+    btn_close.connect("clicked", lambda *_: win.close())
+    win.connect("delete-event", on_delete)
+    bottom = Gtk.Box(spacing=6)
+    bottom.pack_end(btn_apply, False, False, 0)
+    bottom.pack_end(btn_close, False, False, 0)
+
+    # The settings of both menus and the shortcuts in one file.
+    def save_file(*_):
+        if settings != saved:
+            apply()
+        tile.settings_file_dialog(win, save=True)
+
+    def load_file(*_):
+        if tile.settings_file_dialog(win, save=False):
+            # Open again, showing the loaded settings.
+            os.execv(sys.argv[0], sys.argv)
+
+    btn_save = Gtk.Button(label="Save settings to file…")
+    btn_save.connect("clicked", save_file)
+    btn_load = Gtk.Button(label="Load settings from file…")
+    btn_load.connect("clicked", load_file)
+    bottom.pack_start(btn_save, False, False, 0)
+    bottom.pack_start(btn_load, False, False, 0)
+    outer.pack_start(bottom, False, False, 0)
+
+    win.show_all()
+    update()
+    if page == "shortcuts":
+        notebook.set_current_page(1)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

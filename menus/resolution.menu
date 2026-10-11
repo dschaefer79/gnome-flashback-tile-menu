@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 dschaefer79
+# Written entirely with Claude (Anthropic's AI assistant).
+# Default menu, used until the settings write each user's own menu.
+
+[Item 00]
+Type=item
+Label=1920 × 1080
+Icon=video-display-symbolic
+Comment=Switch the display resolution to 1920x1080
+Exec=flashback-resolution-set 1920x1080
+
+[Item 01]
+Type=item
+Label=1900 × 1000
+Icon=video-display-symbolic
+Comment=Switch the display resolution to 1900x1000
+Exec=flashback-resolution-set 1900x1000
+
+[Item 02]
+Type=item
+Label=5120 × 1440
+Icon=video-display-symbolic
+Comment=Switch the display resolution to 5120x1440
+Exec=flashback-resolution-set 5120x1440
+
+[Item 03]
+Type=separator
+
+[Item 04]
+Type=item
+Label=Settings…
+Icon=preferences-system-symbolic
+Comment=Add or remove resolutions in this menu
+Exec=flashback-resolution-settings
+
+[Item 05]
+Type=item
+Label=Quit
+Icon=application-exit-symbolic
+Comment=Remove the Resolution menu from the panel (Resolution Menu in the applications menu puts it back)
+Exec=flashback-tile-menu-setup resolution --remove

@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 dschaefer79
+# Written entirely with Claude (Anthropic's AI assistant).
+# Default menu, used until the settings write each user's own menu.
+
+[Item 00]
+Type=item
+Label=Tile automatically
+Icon=view-app-grid-symbolic
+Comment=Tile into the columns and rows set for the screen size
+Exec=flashback-tile auto
+
+[Item 01]
+Type=item
+Label=Tile in 4 columns
+Icon=flashback-tile-columns-4-symbolic
+Comment=Tile the front windows into 4 columns
+Exec=flashback-tile 4
+
+[Item 02]
+Type=item
+Label=Tile in 3 columns
+Icon=flashback-tile-columns-3-symbolic
+Comment=Tile the front windows into 3 columns
+Exec=flashback-tile 3
+
+[Item 03]
+Type=item
+Label=Tile in 2 columns
+Icon=flashback-tile-columns-2-symbolic
+Comment=Tile the front windows into 2 columns
+Exec=flashback-tile 2
+
+[Item 04]
+Type=item
+Label=Tile in 2 × 2 grid
+Icon=flashback-tile-grid-2x2-symbolic
+Comment=Tile the front windows into 2 columns and 2 rows
+Exec=flashback-tile grid-2x2
+
+[Item 05]
+Type=item
+Label=Tile in 3 × 2 grid
+Icon=flashback-tile-grid-3x2-symbolic
+Comment=Tile the front windows into 3 columns and 2 rows
+Exec=flashback-tile grid-3x2
+
+[Item 06]
+Type=item
+Label=Tile in 4 × 2 grid
+Icon=flashback-tile-grid-4x2-symbolic
+Comment=Tile the front windows into 4 columns and 2 rows
+Exec=flashback-tile grid-4x2
+
+[Item 07]
+Type=separator
+
+[Item 08]
+Type=item
+Label=Restore windows
+Icon=view-restore-symbolic
+Comment=Put the windows back where they were before tiling
+Exec=flashback-tile restore
+
+[Item 09]
+Type=separator
+
+[Item 10]
+Type=check
+Label=Automatic tiling
+Comment=Snap windows into place when they are dropped
+Exec=flashback-tile toggle snap
+Active=false
+
+[Item 11]
+Type=check
+Label=Tile new windows
+Comment=Tile each window that opens together with the others
+Exec=flashback-tile toggle tile-new
+Active=false
+
+[Item 12]
+Type=check
+Label=Disable tiling
+Comment=Turn all tiling and snapping off; Restore windows still works
+Exec=flashback-tile toggle disabled
+Active=false
+
+[Item 13]
+Type=separator
+
+[Item 14]
+Type=item
+Label=Keyboard shortcuts…
+Icon=preferences-desktop-keyboard-shortcuts-symbolic
+Comment=Set keyboard shortcuts for tiling
+Exec=flashback-tile-settings --shortcuts
+
+[Item 15]
+Type=item
+Label=Settings…
+Icon=preferences-system-symbolic
+Comment=Choose columns, rows, the window gap and snapping
+Exec=flashback-tile-settings
+
+[Item 16]
+Type=item
+Label=Quit
+Icon=application-exit-symbolic
+Comment=Remove the Tiling menu from the panel (Window Tiling Menu in the applications menu puts it back)
+Exec=flashback-tile-menu-setup tiling --remove
